@@ -1,0 +1,205 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║     🚀 Chibani Lotfi AI — APK Builder v4 (SIGNED RELEASE)      ║
+# ║     APK موقّع ← لا تحذير فيروس — يُثبَّت بدون مشاكل           ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# 🔑 GitHub Secrets المطلوبة (Settings → Secrets → Actions → New):
+#
+#   KEYSTORE_BASE64   ← الـ keystore مشفّر base64
+#   KEY_ALIAS         ← اسم المفتاح   (مثال: chibani)
+#   KEY_PASSWORD      ← كلمة مرور المفتاح
+#   STORE_PASSWORD    ← كلمة مرور الـ keystore
+#
+# ❓ لتوليد الـ Secrets → انظر التعليمات في ملف HOWTO_SIGN.md
+# ══════════════════════════════════════════════════════════════════
+
+name: 🚀 Build Chibani Lotfi AI — Signed APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: 📱 Signed Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+
+      # ── 1. Checkout ──────────────────────────────────────────────
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Java 17 ───────────────────────────────────────────────
+      - name: ☕ Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ── 3. Node.js 22 ────────────────────────────────────────────
+      - name: 🟢 Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ── 4. Android SDK ───────────────────────────────────────────
+      - name: 📱 Android SDK Licenses
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          MGR=$(find "$SDK" -name "sdkmanager" 2>/dev/null | head -1)
+          if [ -n "$MGR" ]; then
+            yes | "$MGR" --licenses > /dev/null 2>&1 || true
+            yes | "$MGR" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          fi
+          echo "✅ Android SDK OK"
+
+      # ── 5. Keystore ──────────────────────────────────────────────
+      - name: 🔑 Decode Keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
+            echo "✅ Keystore decoded ($(du -sh keystore.jks | cut -f1))"
+          else
+            echo "⚠️ لا يوجد KEYSTORE_BASE64 — سيُنتج APK debug غير موقّع"
+            echo "NO_KEYSTORE=true" >> $GITHUB_ENV
+          fi
+
+      # ── 6. package.json ──────────────────────────────────────────
+      - name: 📦 package.json
+        run: |
+          node -e "
+          require('fs').writeFileSync('package.json', JSON.stringify({
+            name:'chibani-lotfi-ai', version:'13.0.0',
+            description:'Chibani Lotfi AI V13 ULTRA',
+            scripts:{build:'echo ok'},
+            dependencies:{'@capacitor/android':'^6.1.2','@capacitor/core':'^6.1.2'},
+            devDependencies:{'@capacitor/cli':'^6.1.2'}
+          },null,2));
+          console.log('✅ package.json');
+          "
+
+      # ── 7. capacitor.config.json ─────────────────────────────────
+      - name: ⚙️ capacitor.config.json
+        run: |
+          node -e "
+          require('fs').writeFileSync('capacitor.config.json', JSON.stringify({
+            appId:'com.chibani.lotfi.ai',
+            appName:'Chibani Lotfi AI',
+            webDir:'www',
+            android:{allowMixedContent:true,captureInput:true},
+            server:{cleartext:true,allowNavigation:['*']}
+          },null,2));
+          console.log('✅ capacitor.config.json');
+          "
+
+      # ── 8. Copy HTML ─────────────────────────────────────────────
+      - name: 📁 Copy index.html → www/
+        run: |
+          mkdir -p www
+          cp index.html www/index.html
+          echo "✅ HTML copied"
+
+      # ── 9. npm install ───────────────────────────────────────────
+      - name: 📥 npm install
+        run: npm install
+
+      # ── 10. Capacitor ────────────────────────────────────────────
+      - name: ➕ cap add android
+        run: npx cap add android
+
+      - name: 🔄 cap sync android
+        run: npx cap sync android
+
+      # ── 11. Patch Manifest ───────────────────────────────────────
+      - name: 🔧 Patch AndroidManifest.xml
+        run: |
+          M="android/app/src/main/AndroidManifest.xml"
+          sed -i 's/android:allowBackup="true"/android:allowBackup="true" android:usesCleartextTraffic="true" android:hardwareAccelerated="true"/' "$M"
+          echo "✅ Manifest patched"
+
+      # ── 12. Signing Config ───────────────────────────────────────
+      - name: 🔏 Inject Signing Config
+        run: |
+          GRADLE="android/app/build.gradle"
+
+          if [ "$NO_KEYSTORE" != "true" ]; then
+            # إضافة signingConfigs قبل android{
+            sed -i '/^android {/i\
+            signingConfigs {\
+                release {\
+                    storeFile file("../../../keystore.jks")\
+                    storePassword System.getenv("STORE_PASSWORD")\
+                    keyAlias System.getenv("KEY_ALIAS")\
+                    keyPassword System.getenv("KEY_PASSWORD")\
+                }\
+            }' "$GRADLE"
+
+            # ربط release buildType بـ signingConfig
+            sed -i '/buildTypes {/,/}/ s/release {/release {\n                signingConfig signingConfigs.release/' "$GRADLE"
+            echo "✅ Signing config injected"
+          else
+            echo "⚠️ تخطي التوقيع — بدون keystore"
+          fi
+
+          # رقم الإصدار
+          sed -i 's/versionCode 1$/versionCode 13/'        "$GRADLE"
+          sed -i 's/versionName "1.0"/versionName "13.0"/' "$GRADLE"
+          echo "✅ Version 13.0"
+
+      # ── 13. Build APK ────────────────────────────────────────────
+      - name: 🏗️ Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+
+          if [ "$NO_KEYSTORE" != "true" ]; then
+            echo "🔏 Building SIGNED Release APK..."
+            ./gradlew assembleRelease \
+              --no-daemon --stacktrace \
+              -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m"
+          else
+            echo "🔧 Building Debug APK (no keystore)..."
+            ./gradlew assembleDebug \
+              --no-daemon --stacktrace \
+              -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m"
+          fi
+        env:
+          ANDROID_HOME:     ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          STORE_PASSWORD:   ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS:        ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:     ${{ secrets.KEY_PASSWORD }}
+
+      # ── 14. Collect APK ──────────────────────────────────────────
+      - name: 📋 Collect APK
+        run: |
+          mkdir -p dist
+          # Release موقّع أو Debug كـ fallback
+          APK=$(find android/app/build/outputs/apk -name "*.apk" | head -1)
+          echo "Found APK: $APK"
+          cp "$APK" dist/ChibaniLotfiAI-V13-ULTRA.apk
+          SIZE=$(du -sh dist/ChibaniLotfiAI-V13-ULTRA.apk | cut -f1)
+
+          echo "### ✅ APK جاهز!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| المعلومة | القيمة |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 الملف | \`ChibaniLotfiAI-V13-ULTRA.apk\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📏 الحجم | $SIZE |" >> $GITHUB_STEP_SUMMARY
+          if [ "$NO_KEYSTORE" != "true" ]; then
+            echo "| 🔏 النوع | **Release موقّع** ✅ |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| 🔧 النوع | Debug (غير موقّع) ⚠️ |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ── 15. Upload Artifact ──────────────────────────────────────
+      - name: 📤 Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChibaniLotfiAI-V13-ULTRA
+          path: dist/ChibaniLotfiAI-V13-ULTRA.apk
+          retention-days: 30
+          if-no-files-found: error
